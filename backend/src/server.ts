@@ -29,11 +29,23 @@ const upload=multer({
 dotenv.config()
 const app=express()
 
-app.post('/image',upload.single('traffic_frame'),(req,res)=>{
+app.post('/image',upload.single('traffic_frame'),async (req,res)=>{
     if(!req.file){
         return res.status(400).json({error:'No file found'})
     }
     const buffer=req.file.buffer
+    const stringBuffer=buffer.toString('base64')
+    try{
+        const visionModelResponse=await imageModel.invoke([
+            {type:'system',content:`You will be given an image, you have to analyze this image and identify the scene, count the number of vehicles and classify them`},
+            {type:'human',content:[{type:'image_url',image_url:`data:${req.file.mimetype};base64,${stringBuffer}`}]}
+        ])
+        return res.status(200).json({message:visionModelResponse.content})
+    }
+    catch(err){
+        console.log(err)
+        return res.status(500).json({error:"Internal server error"})
+    }
 })
 
 const PORT=process.env.PORT||8000
