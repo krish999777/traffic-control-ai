@@ -1,19 +1,24 @@
 import express from 'express'
 import dotenv from 'dotenv'
-import {ChatOllama} from '@langchain/ollama'
+import {ChatOllama,OllamaEmbeddings} from '@langchain/ollama'
 import {initChatModel} from 'langchain'
+import {QdrantVectorStore} from '@langchain/qdrant'
+import {Document} from '@langchain/core/documents'
 import multer from 'multer'
 import * as z from 'zod'
 
 dotenv.config()
 const app=express()
+app.use(express.json())
 
-const imageModel=new ChatOllama({
+const visionModel=new ChatOllama({
     model:'minicpm-v4.5:8b'
 })
-
-const model=initChatModel('lfm2.5:8b',{
+const model=await initChatModel('lfm2.5:8b',{
     modelProvider:'ollama'
+})
+const embeddingModel=new OllamaEmbeddings({
+    model:'nomic-embed-text-v2-moe',
 })
 
 const upload=multer({
@@ -57,6 +62,16 @@ const visionModelSystemPrompt=`
 You will be provided an image for a traffic intersection. You have to respond in the structred output schema as provided
 Remember to be accurate on all the reading and take your time
 `
+const desisionModelSchema=z.object({
+    isSolutionNeeded:z.boolean().describe(`
+Use the following rules to decide if it should be true:
+1)If the trafficOrder is messy
+2)If the trafficOrder is moderate and trafficDensity is high
+3)If the trafficOrder is moderate and trafficDensity is medium but the observation is negetive or other factors or negetive, use the historic data provided to also decide what to choose.
+4)If historical data provided point to true most of the time
+`),
+    reasoning:z.string().describe('Your reasoning behind this decision')
+})
 
 app.post('/image',upload.single('traffic_frame'),async (req,res)=>{
     if(!req.file){
@@ -65,7 +80,7 @@ app.post('/image',upload.single('traffic_frame'),async (req,res)=>{
     const buffer=req.file.buffer
     const stringBuffer=buffer.toString('base64')
     try{
-        const structuredVisionModel=imageModel.withStructuredOutput(visionModelSchema)
+        const structuredVisionModel=visionModel.withStructuredOutput(visionModelSchema)
         const visionModelResponse=await structuredVisionModel.invoke([
             {type:'system',content:visionModelSystemPrompt},
             {type:'human',content:[{type:'image_url',image_url:`data:${req.file.mimetype};base64,${stringBuffer}`}]}
@@ -76,6 +91,49 @@ app.post('/image',upload.single('traffic_frame'),async (req,res)=>{
         console.log(err)
         return res.status(500).json({error:"Internal server error"})
     }
+})
+
+const decisionRagBody=z.object({
+    input:visionModelSchema,
+    output:desisionModelSchema
+})
+
+type DecisionRagType=z.infer<typeof decisionRagBody>
+
+function documentFromStructuredLanguage(data:DecisionRagType){
+    return new Document({
+        pageContent:`
+            Traffic situation:
+            Vehicle count: ${data.input.vehicleCount}
+            Four-wheelers: ${data.input.fourWheelerCount}
+            Two-wheelers: ${data.input.twoWheelerCount}
+            Auto-rickshaws: ${data.input.autoCount}
+            Traffic density: ${data.input.trafficDensity}
+            Traffic order: ${data.input.trafficOrder}
+            Scene observation: ${data.input.observation}
+        `,
+        metadata:data.output
+    })
+}
+
+app.post('/decisionRag',async (req,res)=>{
+    const body=req.body
+    const output=decisionRagBody.safeParse(body)
+    if(!output.success){
+        return res.status(400).json({error:output.error.issues.map(issue=>issue.message)})
+    }
+    const data=output.data
+    const dbUrl=process.env.QDRANT_URL
+    const dbApiKey=process.env.QDRANT_API_KEY
+    if(!dbUrl||!dbApiKey){
+        return res.status(500).json({error:"Qdrant url environment variable missing on server"})
+    }
+
+
+    const docs=documentFromStructuredLanguage(data)
+    const decisionVectorStore=await QdrantVectorStore.fromExistingCollection(embeddingModel,{url:dbUrl,apiKey:dbApiKey,collectionName:'traffic-decision'})
+    const embedded=await decisionVectorStore.addDocuments([docs])
+    return res.status(200).json({message:'Embedded sucessfully',db:embedded})
 })
 
 const PORT=process.env.PORT||8000
