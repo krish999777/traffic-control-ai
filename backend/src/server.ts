@@ -62,16 +62,52 @@ const visionModelSystemPrompt=`
 You will be provided an image for a traffic intersection. You have to respond in the structred output schema as provided
 Remember to be accurate on all the reading and take your time
 `
-const desisionModelSchema=z.object({
+const decisionModelSchema=z.object({
     isSolutionNeeded:z.boolean().describe(`
-Use the following rules to decide if it should be true:
-1)If the trafficOrder is messy
-2)If the trafficOrder is moderate and trafficDensity is high
-3)If the trafficOrder is moderate and trafficDensity is medium but the observation is negetive or other factors or negetive, use the historic data provided to also decide what to choose.
-4)If historical data provided point to true most of the time
+Determine whether the current traffic situation requires a traffic-management solution.
+
+Consider:
+- traffic density
+- traffic order
+- vehicle counts
+- whether vehicles are simply queued at a traffic signal
+- the scene observation
+- the retrieved historical cases and their previous decisions
+
+Do not assume that high vehicle count or a signal queue automatically means a solution is needed.
+Use the historical cases as supporting evidence and decide based on how similar the current situation is to those cases.
+The main factors are traffic order, density and observation.
 `),
     reasoning:z.string().describe('Your reasoning behind this decision')
 })
+
+const decisionModelPrompt=`
+You are a traffic decision agent.
+
+You will receive:
+
+1. The current traffic situation:
+{
+    vehicleCount: number,
+    fourWheelerCount: number,
+    twoWheelerCount: number,
+    autoCount: number,
+    trafficDensity: "low" | "medium" | "high",
+    trafficOrder: "orderly" | "moderate" | "messy",
+    observation: string
+}
+
+2. Historical cases that are similar to the current traffic situation.
+Each historical case contains the traffic situation and the decision previously made for that case.
+
+Determine whether the current traffic situation requires a solution.
+
+Use the historical cases as supporting evidence, but do not blindly copy their decisions. Consider how closely they match the current situation.
+
+Pay particular attention to whether apparent congestion is simply a normal, orderly traffic-signal queue rather than a genuine traffic problem.
+
+Return only the requested structured output.
+`
 
 app.post('/image',upload.single('traffic_frame'),async (req,res)=>{
     if(!req.file){
@@ -95,7 +131,7 @@ app.post('/image',upload.single('traffic_frame'),async (req,res)=>{
 
 const decisionRagBody=z.object({
     input:visionModelSchema,
-    output:desisionModelSchema
+    output:decisionModelSchema
 })
 
 type DecisionRagType=z.infer<typeof decisionRagBody>
