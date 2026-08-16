@@ -117,6 +117,43 @@ Pay particular attention to whether apparent congestion is simply a normal, orde
 
 Return only the requested structured output.
 `
+
+const solutionModelPrompt=`
+You are a traffic-management solution agent.
+
+The decision agent has already determined that the current traffic situation requires a solution.
+
+You will receive:
+
+1. The current traffic situation, including:
+- vehicle counts
+- traffic density
+- traffic order
+- scene observation
+
+2. The decision agent's reasoning for why the situation requires intervention.
+
+3. Historical cases containing:
+- traffic situations similar to the current situation
+- solutions that were previously proposed
+- human ratings indicating how useful those solutions were
+
+Your task is to propose the most appropriate practical traffic-management solution for the current situation.
+
+Use the historical cases as supporting evidence. Give greater consideration to solutions from highly similar cases that received better human ratings.
+
+Do not blindly copy a historical solution. Adapt it to the current traffic situation.
+
+The proposed solution should be:
+- practical
+- specific to the observed traffic problem
+- feasible as a traffic-management intervention
+- concise enough for a human reviewer to understand and evaluate
+
+Do not reconsider whether a solution is needed. That decision has already been made by the decision agent.
+
+Return only the proposed solution in plain text.
+`
 const decisionRagBody=z.object({
     input:visionModelSchema,
     output:decisionModelSchema
@@ -136,28 +173,47 @@ type SolutionRagAnnotation={
 
 const graphAnnotation=Annotation.Root({
     visionModelResponse:Annotation<z.infer<typeof visionModelSchema>>(),
-    similaritySearchResponse:Annotation<z.infer<typeof decisionRagBody>[]>(),
+    decisionSimilaritySearchResponse:Annotation<z.infer<typeof decisionRagBody>[]>(),
     decisionModelResponse:Annotation<z.infer<typeof decisionModelSchema>>(),
+    solutionSimilaritySearchResponse:Annotation<SolutionRagAnnotation>(),
+    solutionModelResponse:Annotation<string>()
 })
 
 const graph=new StateGraph(graphAnnotation)
 .addNode('decisionSimilaritySearch',async (state)=>{
     const similaritySearch=await decisionVectorStore.similaritySearch(nlFromStructuredLanguage(state.visionModelResponse),5)
-    return {similaritySearchResponse:similaritySearch.map(doc=>({input:doc.pageContent,output:JSON.stringify(doc.metadata)}))}
+    return {decisionSimilaritySearchResponse:similaritySearch.map(doc=>({input:doc.pageContent,output:JSON.stringify(doc.metadata)}))}
 })
 .addNode('decisionModel',async (state)=>{
     const res=await model.withStructuredOutput(decisionModelSchema).invoke([
         new SystemMessage(decisionModelPrompt),
         new HumanMessage(`
-Historical cases: ${state.similaritySearchResponse.map((data:any)=>`input:${data.input} output:${data.output}`).join('\n')}//why am i getting type error here?
+Historical cases: ${state.decisionSimilaritySearchResponse.map((data:any)=>`input:${data.input} output:${data.output}`).join('\n')}//why am i getting type error here?
 Current Case: ${JSON.stringify(state.visionModelResponse)}
 `)
     ])
-    return {decisionModelResponse:res}
+    return new Command({goto:res.isSolutionNeeded?'solutionSimilaritySearch':END,update:{decisionModelResponse:res}})
+},{
+    ends:[END,'solutionSimilaritySearch']
+})
+.addNode('solutionSimilaritySearch',async (state)=>{
+    const similaritySearch=await solutionVectorStore.similaritySearch(nlFromStructuredLanguage(state.visionModelResponse),5)
+    return {solutionSimilaritySearchResponse:similaritySearch.map(doc=>({input:doc.pageContent,output:doc.metadata}))}
+})
+.addNode('solutionModel',async (state)=>{
+    const res=await model.invoke([
+        new SystemMessage(solutionModelPrompt),
+        new HumanMessage(`
+Historical cases: ${state.solutionSimilaritySearchResponse}
+Current case: ${JSON.stringify(state.visionModelResponse)}
+`)
+    ])
+    return {solutionModelResponse:res.content}
 })
 .addEdge(START,'decisionSimilaritySearch')
 .addEdge('decisionSimilaritySearch','decisionModel')
-.addEdge('decisionModel',END)
+.addEdge('solutionSimilaritySearch','solutionModel')
+.addEdge('solutionModel',END)
 
 const compiledGraph=graph.compile()
 
@@ -175,8 +231,11 @@ app.post('/image',upload.single('traffic_frame'),async (req,res)=>{
             {type:'human',content:[{type:'image_url',image_url:`data:${req.file.mimetype};base64,${stringBuffer}`}]}
         ])
         const finalData=await compiledGraph.invoke({visionModelResponse})
+        if(!finalData.decisionModelResponse.isSolutionNeeded){
+            return res.status(200).json({message:"No solution needed"})
+        }
         console.log(finalData)
-
+        return res.status(200).json({message:`solution:${finalData.solutionModelResponse}`})
     }
     catch(err){
         console.log(err)
