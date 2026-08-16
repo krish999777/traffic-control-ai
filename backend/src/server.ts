@@ -1,9 +1,10 @@
 import express from 'express'
 import dotenv from 'dotenv'
 import {ChatOllama,OllamaEmbeddings} from '@langchain/ollama'
-import {initChatModel} from 'langchain'
+import {initChatModel,SystemMessage,HumanMessage} from 'langchain'
 import {QdrantVectorStore} from '@langchain/qdrant'
 import {Document} from '@langchain/core/documents'
+import {StateGraph,START,END,Annotation} from '@langchain/langgraph'
 import multer from 'multer'
 import * as z from 'zod'
 
@@ -20,6 +21,13 @@ const model=await initChatModel('lfm2.5:8b',{
 const embeddingModel=new OllamaEmbeddings({
     model:'nomic-embed-text-v2-moe',
 })
+
+const dbUrl=process.env.QDRANT_URL
+const dbApiKey=process.env.QDRANT_API_KEY
+if(!dbUrl||!dbApiKey){
+    throw new Error('QDRANT_URL and QDRANT_API_KEY are required')
+}
+const decisionVectorStore=await QdrantVectorStore.fromExistingCollection(embeddingModel,{url:dbUrl,apiKey:dbApiKey,collectionName:'traffic-decision'})
 
 const upload=multer({
     storage:multer.memoryStorage(),
@@ -70,7 +78,7 @@ Consider:
 - traffic density
 - traffic order
 - vehicle counts
-- whether vehicles are simply queued at a traffic signal
+- whether vehicles are simply queued at a t\raffic signal
 - the scene observation
 - the retrieved historical cases and their previous decisions
 
@@ -108,6 +116,38 @@ Pay particular attention to whether apparent congestion is simply a normal, orde
 
 Return only the requested structured output.
 `
+const decisionRagBody=z.object({
+    input:visionModelSchema,
+    output:decisionModelSchema
+})
+
+const graphAnnotation=Annotation.Root({
+    visionModelResponse:Annotation<z.infer<typeof visionModelSchema>>(),
+    similaritySearchResponse:Annotation<z.infer<typeof decisionRagBody>[]>(),
+    decisionModelResponse:Annotation<z.infer<typeof decisionModelSchema>>(),
+})
+
+const graph=new StateGraph(graphAnnotation)
+.addNode('decisionSimilaritySearch',async (state)=>{
+    const similaritySearch=await decisionVectorStore.similaritySearch(nlFromStructuredLanguage(state.visionModelResponse),5)
+    return {similaritySearchResponse:similaritySearch.map(doc=>({input:doc.pageContent,output:JSON.stringify(doc.metadata)}))}
+})
+.addNode('decisionModel',async (state)=>{
+    const res=await model.withStructuredOutput(decisionModelSchema).invoke([
+        new SystemMessage(decisionModelPrompt),
+        new HumanMessage(`
+Historical cases: ${state.similaritySearchResponse.map((data:any)=>`input:${data.input} output:${data.output}`).join('\n')}//why am i getting type error here?
+Current Case: ${JSON.stringify(state.visionModelResponse)}
+`)
+    ])
+    return {decisionModelResponse:res}
+})
+.addEdge(START,'decisionSimilaritySearch')
+.addEdge('decisionSimilaritySearch','decisionModel')
+.addEdge('decisionModel',END)
+
+const compiledGraph=graph.compile()
+
 
 app.post('/image',upload.single('traffic_frame'),async (req,res)=>{
     if(!req.file){
@@ -121,7 +161,9 @@ app.post('/image',upload.single('traffic_frame'),async (req,res)=>{
             {type:'system',content:visionModelSystemPrompt},
             {type:'human',content:[{type:'image_url',image_url:`data:${req.file.mimetype};base64,${stringBuffer}`}]}
         ])
-        return res.status(200).json({message:visionModelResponse})
+        const finalData=await compiledGraph.invoke({visionModelResponse})
+        console.log(finalData)
+
     }
     catch(err){
         console.log(err)
@@ -129,27 +171,25 @@ app.post('/image',upload.single('traffic_frame'),async (req,res)=>{
     }
 })
 
-const decisionRagBody=z.object({
-    input:visionModelSchema,
-    output:decisionModelSchema
-})
-
 type DecisionRagType=z.infer<typeof decisionRagBody>
 
 function documentFromStructuredLanguage(data:DecisionRagType){
     return new Document({
-        pageContent:`
-            Traffic situation:
-            Vehicle count: ${data.input.vehicleCount}
-            Four-wheelers: ${data.input.fourWheelerCount}
-            Two-wheelers: ${data.input.twoWheelerCount}
-            Auto-rickshaws: ${data.input.autoCount}
-            Traffic density: ${data.input.trafficDensity}
-            Traffic order: ${data.input.trafficOrder}
-            Scene observation: ${data.input.observation}
-        `,
+        pageContent:nlFromStructuredLanguage(data.input),
         metadata:data.output
     })
+}
+function nlFromStructuredLanguage(input:z.infer<typeof visionModelSchema>){
+    return `
+Traffic situation:
+Vehicle count: ${input.vehicleCount}
+Four-wheelers: ${input.fourWheelerCount}
+Two-wheelers: ${input.twoWheelerCount}
+Auto-rickshaws: ${input.autoCount}
+Traffic density: ${input.trafficDensity}
+Traffic order: ${input.trafficOrder}
+Scene observation: ${input.observation}
+`
 }
 
 app.post('/decisionRag',async (req,res)=>{
@@ -159,17 +199,14 @@ app.post('/decisionRag',async (req,res)=>{
         return res.status(400).json({error:output.error.issues.map(issue=>issue.message)})
     }
     const data=output.data
-    const dbUrl=process.env.QDRANT_URL
-    const dbApiKey=process.env.QDRANT_API_KEY
-    if(!dbUrl||!dbApiKey){
-        return res.status(500).json({error:"Qdrant url environment variable missing on server"})
-    }
-
-
     const docs=documentFromStructuredLanguage(data)
-    const decisionVectorStore=await QdrantVectorStore.fromExistingCollection(embeddingModel,{url:dbUrl,apiKey:dbApiKey,collectionName:'traffic-decision'})
-    const embedded=await decisionVectorStore.addDocuments([docs])
-    return res.status(200).json({message:'Embedded sucessfully',db:embedded})
+    try{
+        await decisionVectorStore.addDocuments([docs])
+        return res.status(200).json({message:'Embedded sucessfully'})
+    }catch(err){
+        console.log(err)
+        return res.status(500).json({error:"Internal server error"})
+    }
 })
 
 const PORT=process.env.PORT||8000
