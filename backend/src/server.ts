@@ -4,7 +4,7 @@ import {ChatOllama,OllamaEmbeddings} from '@langchain/ollama'
 import {initChatModel,SystemMessage,HumanMessage} from 'langchain'
 import {QdrantVectorStore} from '@langchain/qdrant'
 import {Document} from '@langchain/core/documents'
-import {StateGraph,START,END,Annotation} from '@langchain/langgraph'
+import {StateGraph,START,END,Annotation,Command} from '@langchain/langgraph'
 import multer from 'multer'
 import * as z from 'zod'
 
@@ -28,6 +28,7 @@ if(!dbUrl||!dbApiKey){
     throw new Error('QDRANT_URL and QDRANT_API_KEY are required')
 }
 const decisionVectorStore=await QdrantVectorStore.fromExistingCollection(embeddingModel,{url:dbUrl,apiKey:dbApiKey,collectionName:'traffic-decision'})
+const solutionVectorStore=await QdrantVectorStore.fromExistingCollection(embeddingModel,{apiKey:dbApiKey,url:dbUrl,collectionName:'traffic-solution'})
 
 const upload=multer({
     storage:multer.memoryStorage(),
@@ -120,6 +121,18 @@ const decisionRagBody=z.object({
     input:visionModelSchema,
     output:decisionModelSchema
 })
+const solutionRagBody=z.object({
+    input:visionModelSchema,
+    output:z.object({
+        solution:z.string(),
+        humanRating:z.number().int().min(1).max(5)
+    })
+})
+
+type SolutionRagAnnotation={
+    input:z.infer<typeof visionModelSchema>,
+    output:string
+}
 
 const graphAnnotation=Annotation.Root({
     visionModelResponse:Annotation<z.infer<typeof visionModelSchema>>(),
@@ -203,6 +216,29 @@ app.post('/decisionRag',async (req,res)=>{
     try{
         await decisionVectorStore.addDocuments([docs])
         return res.status(200).json({message:'Embedded sucessfully'})
+    }catch(err){
+        console.log(err)
+        return res.status(500).json({error:"Internal server error"})
+    }
+})
+
+app.post('/solutionRag',async (req,res)=>{
+    const body=req.body
+    const output=solutionRagBody.safeParse(body)
+    if(!output.success){
+        return res.status(400).json({error:output.error.issues.map(issue=>issue.message)})
+    }
+    const {data}=output
+    const doc=new Document({
+        pageContent:nlFromStructuredLanguage(data.input),
+        metadata:{
+            solution:data.output.solution,
+            humanRating:data.output.humanRating
+        }
+    })
+    try{
+        await solutionVectorStore.addDocuments([doc])
+        return res.status(200).json({message:"Embedded successfuly"})
     }catch(err){
         console.log(err)
         return res.status(500).json({error:"Internal server error"})
