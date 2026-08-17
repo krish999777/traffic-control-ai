@@ -4,7 +4,7 @@ import {ChatOllama,OllamaEmbeddings} from '@langchain/ollama'
 import {initChatModel,SystemMessage,HumanMessage} from 'langchain'
 import {QdrantVectorStore} from '@langchain/qdrant'
 import {Document} from '@langchain/core/documents'
-import {StateGraph,START,END,Annotation,Command,MemorySaver} from '@langchain/langgraph'
+import {StateGraph,START,END,Annotation,Command,MemorySaver,interrupt} from '@langchain/langgraph'
 import multer from 'multer'
 import * as z from 'zod'
 
@@ -214,10 +214,25 @@ Current case: ${JSON.stringify(state.visionModelResponse)}
     ])
     return {solutionModelResponse:res.solution}
 })
+.addNode('humanReview',async (state)=>{
+    const rating=interrupt('What is the rating of this response')
+    if(rating<=2){
+        return {}
+    }
+    await solutionVectorStore.addDocuments([new Document({
+        pageContent:nlFromStructuredLanguage(state.visionModelResponse),
+        metadata:{
+            solution:state.solutionModelResponse,
+            humanRating:rating
+        }
+    })])
+    return {}
+})
 .addEdge(START,'decisionSimilaritySearch')
 .addEdge('decisionSimilaritySearch','decisionModel')
 .addEdge('solutionSimilaritySearch','solutionModel')
-.addEdge('solutionModel',END)
+.addEdge('solutionModel','humanReview')
+.addEdge('humanReview',END)
 
 const compiledGraph=graph.compile({checkpointer})
 
@@ -235,7 +250,7 @@ app.post('/image',upload.single('traffic_frame'),async (req,res)=>{
             {type:'human',content:[{type:'image_url',image_url:`data:${req.file.mimetype};base64,${stringBuffer}`}]}
         ])
         const currentThreadId=thread_id++
-        const finalData=await compiledGraph.invoke({visionModelResponse},{configurable:{thread_id:currentThreadId}})
+        const finalData=await compiledGraph.invoke({visionModelResponse},{configurable:{thread_id:String(currentThreadId)}})
         if(!finalData.decisionModelResponse.isSolutionNeeded){
             return res.status(200).json({message:"No solution needed"})
         }
@@ -305,6 +320,27 @@ app.post('/solutionRag',async (req,res)=>{
     }catch(err){
         console.log(err)
         return res.status(500).json({error:"Internal server error"})
+    }
+})
+
+const feedbackSchema=z.object({
+    rating:z.number().int().min(1).max(5),
+    thread_id:z.number().int().positive()
+})
+
+app.post('/feedback',async (req,res)=>{
+    const body=req.body
+    const output=feedbackSchema.safeParse(body)
+    if(!output.success){
+        return res.status(400).json({error:output.error.issues.map(err=>err.message)})
+    }
+    const {rating,thread_id}=output.data
+    try{
+        await compiledGraph.invoke(new Command({resume:rating}),{configurable:{thread_id:String(thread_id)}})
+        return res.status(200).json({message:rating<=2?'Solution not embedded, since rating 2 or below':'Solution embedded'})
+    }catch(err){
+        console.log(err)
+        res.status(500).json({error:"Internal server error"})
     }
 })
 
