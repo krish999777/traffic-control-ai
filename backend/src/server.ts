@@ -7,10 +7,12 @@ import {Document} from '@langchain/core/documents'
 import {StateGraph,START,END,Annotation,Command,MemorySaver,interrupt} from '@langchain/langgraph'
 import multer from 'multer'
 import * as z from 'zod'
+import cors from 'cors'
 
 dotenv.config()
 const app=express()
 app.use(express.json())
+app.use(cors())
 
 const visionModel=new ChatOllama({
     model:'minicpm-v4.5:8b'
