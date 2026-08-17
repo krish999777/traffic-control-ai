@@ -1,7 +1,9 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import './App.css'
 
 function App() {
   const [file, setFile] = useState<File | null>(null)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [solution, setSolution] = useState<string | null>(null)
@@ -10,6 +12,20 @@ function App() {
   const [rating, setRating] = useState<number>(5)
   const [ratingLoading, setRatingLoading] = useState(false)
   const [ratingMessage, setRatingMessage] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!file) {
+      setPreviewUrl(null)
+      return
+    }
+
+    const objectUrl = URL.createObjectURL(file)
+    setPreviewUrl(objectUrl)
+
+    return () => {
+      URL.revokeObjectURL(objectUrl)
+    }
+  }, [file])
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -101,20 +117,39 @@ function App() {
   }
 
   return (
-    <div style={{ padding: '2rem', maxWidth: '800px', margin: '0 auto', fontFamily: 'system-ui, sans-serif' }}>
-      <h1>Traffic Analysis Demo</h1>
+    <div className="app-container">
+      <header className="dashboard-header">
+        <h1 className="dashboard-title">
+          <span className="status-dot" />
+          Traffic Analysis System
+        </h1>
+        <span className="system-badge">Vision AI Demo</span>
+      </header>
       
       {error && (
-        <div style={{ color: '#d32f2f', backgroundColor: '#ffebee', padding: '1rem', border: '1px solid #ef9a9a', borderRadius: '4px', marginBottom: '1rem' }}>
+        <div className="alert-error">
           <strong>Error: </strong>{error}
         </div>
       )}
 
+      {/* Frame Preview - Persists throughout analysis/solution/rating flow */}
+      {previewUrl && (
+        <div className="preview-wrapper">
+          <div className="preview-header">
+            <span>Current Frame: {file?.name}</span>
+            <span>{(file ? (file.size / 1024).toFixed(1) + ' KB' : '')}</span>
+          </div>
+          <div className="preview-image-container">
+            <img src={previewUrl} alt="Traffic Frame Preview" className="preview-image" />
+          </div>
+        </div>
+      )}
+
       {!solution && !noSolutionNeeded && (
-        <div style={{ marginBottom: '2rem', padding: '1.5rem', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
-          <div style={{ marginBottom: '1rem' }}>
-            <label htmlFor="file-upload" style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold' }}>
-              Upload Traffic Frame (JPG/PNG/WEBP):
+        <div className="panel">
+          <div className="form-group">
+            <label htmlFor="file-upload" className="form-label">
+              Upload Traffic Frame (JPG / PNG / WEBP)
             </label>
             <input 
               id="file-upload"
@@ -122,42 +157,33 @@ function App() {
               accept=".jpg,.jpeg,.png,.webp" 
               onChange={handleFileChange}
               disabled={loading}
-              style={{ display: 'block', width: '100%', padding: '0.5rem' }}
+              className="file-input"
             />
           </div>
           
           <button 
             onClick={handleAnalyze} 
             disabled={!file || loading}
-            style={{ 
-              padding: '0.75rem 1.5rem', 
-              cursor: (!file || loading) ? 'not-allowed' : 'pointer',
-              backgroundColor: (!file || loading) ? '#cccccc' : '#1976d2',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              fontWeight: 'bold'
-            }}
+            className="btn btn-primary"
           >
+            {loading && <span className="spinner" />}
             {loading ? 'Analyzing Frame...' : 'Analyze Frame'}
           </button>
         </div>
       )}
 
       {noSolutionNeeded && (
-        <div style={{ marginTop: '2rem', padding: '1.5rem', backgroundColor: '#e8f5e9', borderRadius: '8px', border: '1px solid #a5d6a7' }}>
-          <h2 style={{ color: '#2e7d32', marginTop: 0 }}>No traffic issue detected. No solution needed.</h2>
+        <div className="status-panel-no-solution">
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+            <h2>No Traffic Issue Detected</h2>
+            <span className="status-badge-success">Clear</span>
+          </div>
+          <p style={{ margin: '0 0 1.25rem 0', color: 'var(--text-secondary)' }}>
+            No solution needed for this traffic frame.
+          </p>
           <button 
             onClick={handleReset} 
-            style={{ 
-              padding: '0.5rem 1rem', 
-              marginTop: '1rem',
-              backgroundColor: '#ffffff',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              cursor: 'pointer'
-            }}
+            className="btn btn-outline"
           >
             Upload New Frame
           </button>
@@ -165,21 +191,25 @@ function App() {
       )}
 
       {solution && (
-        <div style={{ marginTop: '2rem' }}>
-          <h2>Proposed Solution</h2>
-          <div style={{ backgroundColor: '#fff3e0', padding: '1.5rem', borderRadius: '8px', border: '1px solid #ffcc80', whiteSpace: 'pre-wrap', marginBottom: '2rem' }}>
+        <div className="solution-panel">
+          <div className="solution-header">
+            <h2>Proposed Solution</h2>
+            <span className="status-badge-warning">Action Required</span>
+          </div>
+          
+          <div className="solution-content">
             {solution}
           </div>
 
           {!ratingMessage ? (
-            <div style={{ padding: '1.5rem', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
-              <h3 style={{ marginTop: 0 }}>Rate this solution</h3>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+            <div className="rating-section">
+              <h3>Rate this solution</h3>
+              <div className="rating-controls">
                 <select 
                   value={rating} 
                   onChange={(e) => setRating(Number(e.target.value))}
                   disabled={ratingLoading}
-                  style={{ padding: '0.5rem', fontSize: '1rem', borderRadius: '4px', border: '1px solid #ccc' }}
+                  className="select-input"
                 >
                   <option value={5}>5 - Excellent</option>
                   <option value={4}>4 - Good</option>
@@ -191,34 +221,23 @@ function App() {
                 <button 
                   onClick={handleRatingSubmit} 
                   disabled={ratingLoading}
-                  style={{ 
-                    padding: '0.5rem 1rem',
-                    backgroundColor: ratingLoading ? '#cccccc' : '#4caf50',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: ratingLoading ? 'not-allowed' : 'pointer',
-                    fontSize: '1rem'
-                  }}
+                  className="btn btn-success"
                 >
+                  {ratingLoading && <span className="spinner" />}
                   {ratingLoading ? 'Submitting...' : 'Submit Rating'}
                 </button>
               </div>
             </div>
           ) : (
-            <div style={{ padding: '1.5rem', backgroundColor: '#e8f5e9', borderRadius: '8px', border: '1px solid #a5d6a7' }}>
-              <strong style={{ color: '#2e7d32' }}>Feedback Response: </strong> 
-              <span>{ratingMessage}</span>
-              <div style={{ marginTop: '1.5rem' }}>
+            <div className="feedback-success">
+              <div>
+                <strong>Feedback Response: </strong>
+                <span>{ratingMessage}</span>
+              </div>
+              <div style={{ marginTop: '1.25rem' }}>
                 <button 
                   onClick={handleReset} 
-                  style={{ 
-                    padding: '0.5rem 1rem',
-                    backgroundColor: '#ffffff',
-                    border: '1px solid #ccc',
-                    borderRadius: '4px',
-                    cursor: 'pointer'
-                  }}
+                  className="btn btn-outline"
                 >
                   Upload New Frame
                 </button>
