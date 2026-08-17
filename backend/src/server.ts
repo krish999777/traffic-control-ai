@@ -4,7 +4,7 @@ import {ChatOllama,OllamaEmbeddings} from '@langchain/ollama'
 import {initChatModel,SystemMessage,HumanMessage} from 'langchain'
 import {QdrantVectorStore} from '@langchain/qdrant'
 import {Document} from '@langchain/core/documents'
-import {StateGraph,START,END,Annotation,Command} from '@langchain/langgraph'
+import {StateGraph,START,END,Annotation,Command,MemorySaver} from '@langchain/langgraph'
 import multer from 'multer'
 import * as z from 'zod'
 
@@ -21,6 +21,8 @@ const model=await initChatModel('lfm2.5:8b',{
 const embeddingModel=new OllamaEmbeddings({
     model:'nomic-embed-text-v2-moe',
 })
+const checkpointer=new MemorySaver()
+let thread_id=1
 
 const dbUrl=process.env.QDRANT_URL
 const dbApiKey=process.env.QDRANT_API_KEY
@@ -79,7 +81,7 @@ Consider:
 - traffic density
 - traffic order
 - vehicle counts
-- whether vehicles are simply queued at a t\raffic signal
+- whether vehicles are simply queued at a traffic signal
 - the scene observation
 - the retrieved historical cases and their previous decisions
 
@@ -131,12 +133,10 @@ You will receive:
 - traffic order
 - scene observation
 
-2. The decision agent's reasoning for why the situation requires intervention.
-
-3. Historical cases containing:
+2. Historical cases containing:
 - traffic situations similar to the current situation
 - solutions that were previously proposed
-- human ratings indicating how useful those solutions were
+- human ratings indicating how useful those solutions were (between 1 and 5)
 
 Your task is to propose the most appropriate practical traffic-management solution for the current situation.
 
@@ -152,7 +152,8 @@ The proposed solution should be:
 
 Do not reconsider whether a solution is needed. That decision has already been made by the decision agent.
 
-Return only the proposed solution in plain text.
+Return only the proposed solution in plain text and no json response, only directly text response.
+Do not reply in json with solution and human rating params
 `
 const decisionRagBody=z.object({
     input:visionModelSchema,
@@ -168,14 +169,17 @@ const solutionRagBody=z.object({
 
 type SolutionRagAnnotation={
     input:z.infer<typeof visionModelSchema>,
-    output:string
+    output:{
+        solution:string,
+        humanRating:number
+    }
 }
 
 const graphAnnotation=Annotation.Root({
     visionModelResponse:Annotation<z.infer<typeof visionModelSchema>>(),
     decisionSimilaritySearchResponse:Annotation<z.infer<typeof decisionRagBody>[]>(),
     decisionModelResponse:Annotation<z.infer<typeof decisionModelSchema>>(),
-    solutionSimilaritySearchResponse:Annotation<SolutionRagAnnotation>(),
+    solutionSimilaritySearchResponse:Annotation<SolutionRagAnnotation[]>(),
     solutionModelResponse:Annotation<string>()
 })
 
@@ -188,7 +192,7 @@ const graph=new StateGraph(graphAnnotation)
     const res=await model.withStructuredOutput(decisionModelSchema).invoke([
         new SystemMessage(decisionModelPrompt),
         new HumanMessage(`
-Historical cases: ${state.decisionSimilaritySearchResponse.map((data:any)=>`input:${data.input} output:${data.output}`).join('\n')}//why am i getting type error here?
+Historical cases: ${state.decisionSimilaritySearchResponse.map((data:any)=>`input:${data.input} output:${data.output}`).join('\n')}
 Current Case: ${JSON.stringify(state.visionModelResponse)}
 `)
     ])
@@ -198,24 +202,24 @@ Current Case: ${JSON.stringify(state.visionModelResponse)}
 })
 .addNode('solutionSimilaritySearch',async (state)=>{
     const similaritySearch=await solutionVectorStore.similaritySearch(nlFromStructuredLanguage(state.visionModelResponse),5)
-    return {solutionSimilaritySearchResponse:similaritySearch.map(doc=>({input:doc.pageContent,output:doc.metadata}))}
+    return {solutionSimilaritySearchResponse:similaritySearch.map(doc=>({input:doc.pageContent,output:JSON.stringify(doc.metadata)}))}
 })
 .addNode('solutionModel',async (state)=>{
-    const res=await model.invoke([
+    const res=await model.withStructuredOutput(z.object({solution:z.string()})).invoke([
         new SystemMessage(solutionModelPrompt),
         new HumanMessage(`
-Historical cases: ${state.solutionSimilaritySearchResponse}
+Historical cases: ${state.solutionSimilaritySearchResponse.map(data=>`input:${data.input} output ${data.output}`).join('\n')}
 Current case: ${JSON.stringify(state.visionModelResponse)}
 `)
     ])
-    return {solutionModelResponse:res.content}
+    return {solutionModelResponse:res.solution}
 })
 .addEdge(START,'decisionSimilaritySearch')
 .addEdge('decisionSimilaritySearch','decisionModel')
 .addEdge('solutionSimilaritySearch','solutionModel')
 .addEdge('solutionModel',END)
 
-const compiledGraph=graph.compile()
+const compiledGraph=graph.compile({checkpointer})
 
 
 app.post('/image',upload.single('traffic_frame'),async (req,res)=>{
@@ -230,12 +234,12 @@ app.post('/image',upload.single('traffic_frame'),async (req,res)=>{
             {type:'system',content:visionModelSystemPrompt},
             {type:'human',content:[{type:'image_url',image_url:`data:${req.file.mimetype};base64,${stringBuffer}`}]}
         ])
-        const finalData=await compiledGraph.invoke({visionModelResponse})
+        const currentThreadId=thread_id++
+        const finalData=await compiledGraph.invoke({visionModelResponse},{configurable:{thread_id:currentThreadId}})
         if(!finalData.decisionModelResponse.isSolutionNeeded){
             return res.status(200).json({message:"No solution needed"})
         }
-        console.log(finalData)
-        return res.status(200).json({message:`solution:${finalData.solutionModelResponse}`})
+        return res.status(200).json({message:finalData.solutionModelResponse,thread_id:currentThreadId})
     }
     catch(err){
         console.log(err)
